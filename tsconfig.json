@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "strict":true,//より厳格に型検査を行う。
+    "downlevelIteration": true,// 配列やobjectのketを列挙する場合に必要。
+    "strictNullChecks":true,// nullとundefinedを別物として扱う。
+    "noImplicitAny":true,// 暗黙的にany型として扱わなくなる。
+    "sourceMap": true,
+    "target": "es5", // TSはECMAScript 5に変換
+    "module": "es2015", // TSのモジュールはES Modulesとして出力
+    "moduleResolution": "node"
+  },
+  "entry":"src/main.ts",
+  "include": [
+    "src/*",
+    "src/**/*"
+],
+"exclude": [
+    "node_modules",
+    "**/*.spec.ts"
+]
+}

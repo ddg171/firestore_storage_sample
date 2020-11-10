@@ -1,0 +1,39 @@
+{
+  "env":{
+    "browser": true,
+    "es6": true
+  },
+  "parser": "@typescript-eslint/parser",
+  "parserOptions": {
+    "sourceType": "module",
+    "project": "tsconfig.json"
+  },
+  "extends": [
+    "plugin:@typescript-eslint/eslint-recommended",
+    "plugin:@typescript-eslint/recommended",
+    "eslint:recommended",
+    "plugin:prettier/recommended",
+    "prettier/@typescript-eslint"],
+    "plugins": [
+      "@typescript-eslint"
+    ],
+  "rules":{
+    "no-unused-vars":"warn",
+    "no-global-assign":"error",
+    "no-console":"warn",
+    "prettier/prettier":[
+      "warn",
+      {
+        "singleQuote":true,
+        "trailingComma":"es5"
+      }
+    ]
+  },
+  "globals": {
+    "alert":false,
+    "document":false,
+    "window":false,
+    "console":false,
+    "unkown":true
+  }
+}
