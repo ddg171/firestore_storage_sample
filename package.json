@@ -17,7 +17,8 @@
     "*.{js,ts}": "eslint  --fix"
   },
   "eslintIgnore": [
-    "webpack.config.dev.js"
+    "webpack.config.dev.js",
+    "functions/index.js"
   ],
   "author": "T_Y",
   "license": "ISC",
@@ -41,6 +42,7 @@
     "eslint-config-prettier": "^6.15.0",
     "eslint-plugin-prettier": "^3.1.4",
     "firebase": "^8.0.1",
+    "firebase-tools": "^8.15.1",
     "prettier": "^2.1.2"
   }
 }
