@@ -1,9 +1,6 @@
-
 'use strict';
-
 // // Create and Deploy Your First Cloud Functions
 // // https://firebase.google.com/docs/functions/write-firebase-functions
-
 const functions = require('firebase-functions');
 const mkdirp = require('mkdirp');
 const admin = require('firebase-admin');
@@ -13,14 +10,23 @@ const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
-// 
-const THUMB_MAX_HEIGHT = 300;
-const THUMB_MAX_WIDTH = 300;
+const ffmpeg= require('fluent-ffmpeg');
+const ffmpeg_static = require('ffmpeg-static');
+const ffprobe_static = require('ffprobe-static');
+
+ffmpeg.setFfmpegPath(ffmpeg_static);
+ffmpeg.setFfprobePath(ffprobe_static.path);
+
+// 静止画サムネイルのパラメータ
+const THUMB_MAX_HEIGHT = 600;
+const THUMB_MAX_WIDTH = 600;
 // Thumbnail prefix added to file names.
 const THUMB_PREFIX = 'thumb_';
 const THUMB_DIR = 'thumb'
 
 const DEFAULT_BUCKET ='learn-to-firebase.appspot.com'
+
+
 function deleteFile(path,bucket){
   admin.storage().bucket(bucket).file(path).delete().then(()=>{
     console.log("deleteFile")
@@ -47,7 +53,10 @@ async function createFileDocument(uid,filePath,contentType, parentPath){
 
 async function updateThumbInfo(dataRef,filePath){
   dataRef.update({
-    thumbPath:filePath
+    thumbPath:filePath,
+    updatedDate:admin.firestore.FieldValue.serverTimestamp()
+  }).then(()=>{
+    console.log('サムネイル情報を登録')
   })
 }
 
@@ -60,10 +69,11 @@ async function checkDocExist(parentPath){
     return false
   })
 
+
 }
 
-// サムネイル画像生成関数
-async function generateThumbnail(filePath,bucketName,contentType,customMetaData,thumbHeight,thumbWidth,thumbPrefix,thumbDir){
+// 静止画用サムネイル画像生成関数
+async function generateImageThumbnail(filePath,bucketName,contentType,customMetaData,thumbHeight,thumbWidth,thumbPrefix,thumbDir){
   const fileName = path.basename(filePath)
   const thumbFilePath = path.join(`${thumbDir}`,`${thumbPrefix}${fileName}`)
   const tempLocalFile = path.join(os.tmpdir(), filePath)
@@ -97,9 +107,76 @@ async function generateThumbnail(filePath,bucketName,contentType,customMetaData,
 
 }
 
+// 動画用サムネイル画像生成関数
+async function generateVideoThumbnail(filePath,bucketName,customMetaData,thumbWidth,thumbHeight,thumbPrefix,thumbDir){
+  // cloudstrage側の元ファイルのパス
+  const videoPath =filePath
+  // 元ファイルのファイル名
+  const videoName =path.basename(filePath)
+  const videoNameArray=videoName.split('.')
+  //const len = videoNameArray.length
+  // 元ファイルのディレクトリ
+  const videoDir =path.dirname(filePath)
+  // サムネのファイル名を作成
+  // 拡張子が変わる
+  const thumbNameTemp =[...videoNameArray.slice(0,-1),'jpg'].join('.')
+  const thumbName = `${thumbPrefix}${thumbNameTemp}`
+  // cloud storage側のサムネのパス
+  const thumbPath = path.join(thumbDir,thumbName)
+  // cloud functionの一時フォルダのパス
+  const tempDir =path.join(os.tmpdir(),videoDir)
+  // 一時フォルダ側の元ファイルのパス
+  const tempVideoPath =path.join(tempDir,videoName)
+  // サムネ
+  const tempTumbPath = path.join(tempDir,thumbName)
+  const bucket = admin.storage().bucket(bucketName)
+  const file = bucket.file(videoPath)
+  // サムネイル用メタデータ
+  const metadata = {
+    contentType:'image/jpeg',
+    metadata:customMetaData
+  }
+  // 一時フォルダを作成
+  await mkdirp(tempDir)
+
+  // Download file from bucket.
+  await file.download({ destination: tempVideoPath })
+  console.log('動画をダウンロード: ', tempVideoPath)
+  // Generate a thumbnail using ImageMagick.
+  return new Promise((resolve,reject)=>{
+    ffmpeg(tempVideoPath).on('start',()=>{
+      console.log('start ffmpeg')
+    }).on('end',async ()=>{
+      console.log('サムネイル画像を生成: ', tempTumbPath)
+      await spawn('convert',[tempTumbPath, '-thumbnail', `${thumbWidth}x${thumbHeight}>`, tempTumbPath], { capture: ['stdout', 'stderr'] })
+      // Uploading the Thumbnail.
+      await bucket.upload(tempTumbPath, { destination: thumbPath, metadata })
+        console.log('サムネイル画像をアップロード: ', thumbPath)
+        fs.existsSync(tempVideoPath)?fs.unlinkSync(tempVideoPath):null
+        fs.existsSync(tempTumbPath)?fs.unlinkSync(tempTumbPath):null
+
+      resolve(thumbPath)
+      }).on('error',(e)=>{
+        console.log("動画サムネイル生成に失敗",e)
+        fs.existsSync(tempVideoPath)?fs.unlinkSync(tempVideoPath):null
+        fs.existsSync(tempTumbPath)?fs.unlinkSync(tempTumbPath):null
+        reject(null)
+      }).screenshots({
+        timestamps: [1],
+        filename: thumbName,
+        folder: tempDir
+    })
+  })
+  }
+
+
 // storageトリガー
 // 無限ループに注意
-exports.storageTrriger = functions.storage.object().onFinalize(async (object) => {
+const storageTrrigerOption={
+  timeoutSeconds: 360,
+  memory: '1GB'
+}
+exports.storageTrriger = functions.runWith(storageTrrigerOption).storage.object().onFinalize(async (object) => {
   const filePath = object.name
   const bucketName =object.bucket
   const fileDir = path.dirname(filePath)
@@ -133,8 +210,15 @@ exports.storageTrriger = functions.storage.object().onFinalize(async (object) =>
   const dataRef = await createFileDocument(customMetaData.uid,filePath,contentType, customMetaData.parentPath , customMetaData.isThumb || false)
   // 画像かつサムネイル画像でないならサムネイル作成処理を行う
   if(contentType.startsWith('image/') ){
-    console.log("サムネイル生成")
-    const thumbPath = await generateThumbnail(filePath,bucketName,contentType,customMetaData,THUMB_MAX_HEIGHT,THUMB_MAX_WIDTH,THUMB_PREFIX,THUMB_DIR)
+    console.log("静止画サムネイル生成開始")
+    const thumbPath = await generateImageThumbnail(filePath,bucketName,contentType,customMetaData,THUMB_MAX_HEIGHT,THUMB_MAX_WIDTH,THUMB_PREFIX,THUMB_DIR)
+    console.log("ImageThumbPath:",thumbPath)
+    thumbPath? updateThumbInfo(dataRef,thumbPath):null
+  }
+  if(contentType.startsWith('video/mp4')){
+    console.log("動画サムネイル生成開始")
+    const thumbPath = await generateVideoThumbnail(filePath,bucketName,customMetaData,THUMB_MAX_HEIGHT,THUMB_MAX_WIDTH,THUMB_PREFIX,THUMB_DIR)
+    console.log("videoThumbPath:",thumbPath)
     thumbPath? updateThumbInfo(dataRef,thumbPath):null
   }
   return 0
@@ -143,10 +227,11 @@ exports.storageTrriger = functions.storage.object().onFinalize(async (object) =>
 // fileコレクションのトリガー
 exports.fileCreated=functions.firestore
   .document('file/{fileId}')
-  .onCreate((snapshot, context) => {
+  .onCreate((snapshot, _context) => {
     const fileRef =snapshot.ref
     const data =snapshot.data()
     const parentRef =data.parentRef
+
     parentRef.update({
       files:admin.firestore.FieldValue.arrayUnion(fileRef),
       updatedDate:admin.firestore.FieldValue.serverTimestamp()
