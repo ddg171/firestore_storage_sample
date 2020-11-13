@@ -2,14 +2,17 @@
 // // Create and Deploy Your First Cloud Functions
 // // https://firebase.google.com/docs/functions/write-firebase-functions
 const functions = require('firebase-functions');
-const mkdirp = require('mkdirp');
 const admin = require('firebase-admin');
 admin.initializeApp();
-const spawn = require('child-process-promise').spawn;
+
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
 
+const mkdirp = require('mkdirp');
+const spawn = require('child-process-promise').spawn;
+
+// ffmpeg
 const ffmpeg= require('fluent-ffmpeg');
 const ffmpeg_static = require('ffmpeg-static');
 const ffprobe_static = require('ffprobe-static');
@@ -36,14 +39,18 @@ function deleteFile(path,bucket){
 }
 
 // 投稿されたファイルのドキュメントを作成する関数
-async function createFileDocument(uid,filePath,contentType, parentPath){
+async function createFileDocument(uid,filePath,contentType,size=-1,fileName='',parentPath,memo =''){
   const parentRef = admin.firestore().doc(parentPath)
   return await admin.firestore().collection('file').add({
     uid,
     filePath,
     parentRef,
     contentType,
+    fileName,
+    size:typeof size== "string"? parseInt(size):size,// そのままだと文字列になる
     thumbPath:null,
+    memo:memo?memo:'',
+    updatedDate:admin.firestore.FieldValue.serverTimestamp(),
     createdDate:admin.firestore.FieldValue.serverTimestamp()
   }).catch(e=>{
     console.log(e)
@@ -72,6 +79,16 @@ async function checkDocExist(parentPath){
 
 }
 
+async function getMetadata(filePath,bucket){
+  return await admin.storage().bucket(bucket).file(filePath).getMetadata().then((metadataRaw)=>{
+    return metadataRaw.length?metadataRaw[0]:null
+  }).catch(e=>{
+    console.log("メタデータ取得失敗:",filePath)
+    console.log(e)
+    return null
+  })
+}
+
 // 静止画用サムネイル画像生成関数
 async function generateImageThumbnail(filePath,bucketName,contentType,customMetaData,thumbHeight,thumbWidth,thumbPrefix,thumbDir){
   const fileName = path.basename(filePath)
@@ -81,12 +98,10 @@ async function generateImageThumbnail(filePath,bucketName,contentType,customMeta
   const tempLocalThumbFile = path.join(tempLocalDir,`${thumbPrefix}${fileName}`)
   const bucket = admin.storage().bucket(bucketName)
   const file = bucket.file(filePath)
-
   const metadata = {
     contentType,
     metadata:customMetaData
   }
-
   // Create the temp directory where the storage file will be downloaded.
   await mkdirp(tempLocalDir)
 
@@ -172,16 +187,15 @@ async function generateVideoThumbnail(filePath,bucketName,customMetaData,thumbWi
 
 // storageトリガー
 // 無限ループに注意
-const storageTrrigerOption={
-  timeoutSeconds: 360,
-  memory: '1GB'
-}
-exports.storageTrriger = functions.runWith(storageTrrigerOption).storage.object().onFinalize(async (object) => {
+
+exports.storageTrriger = functions.storage.object().onFinalize(async (object) => {
   const filePath = object.name
   const bucketName =object.bucket
   const fileDir = path.dirname(filePath)
   const fileName = path.basename(filePath)
   const contentType = object.contentType // This is the image MIME type
+  const size =object.size || -1
+  
   const customMetaData = object.metadata || null
   console.log(object)
   // 親ドキュメントの情報が存在しない場合はファイルを削除して終了。
@@ -207,35 +221,58 @@ exports.storageTrriger = functions.runWith(storageTrrigerOption).storage.object(
   }
   // 投稿されたファイル情報をFirestoreに登録
   console.log("登録処理")
-  const dataRef = await createFileDocument(customMetaData.uid,filePath,contentType, customMetaData.parentPath , customMetaData.isThumb || false)
-  // 画像かつサムネイル画像でないならサムネイル作成処理を行う
-  if(contentType.startsWith('image/') ){
-    console.log("静止画サムネイル生成開始")
-    const thumbPath = await generateImageThumbnail(filePath,bucketName,contentType,customMetaData,THUMB_MAX_HEIGHT,THUMB_MAX_WIDTH,THUMB_PREFIX,THUMB_DIR)
-    console.log("ImageThumbPath:",thumbPath)
-    thumbPath? updateThumbInfo(dataRef,thumbPath):null
-  }
-  if(contentType.startsWith('video/mp4')){
-    console.log("動画サムネイル生成開始")
-    const thumbPath = await generateVideoThumbnail(filePath,bucketName,customMetaData,THUMB_MAX_HEIGHT,THUMB_MAX_WIDTH,THUMB_PREFIX,THUMB_DIR)
-    console.log("videoThumbPath:",thumbPath)
-    thumbPath? updateThumbInfo(dataRef,thumbPath):null
-  }
+  createFileDocument(customMetaData.uid,filePath,contentType,size,fileName, customMetaData.parentPath,customMetaData.originalName|| '')
   return 0
 })
 
 // fileコレクションのトリガー
-exports.fileCreated=functions.firestore
+const fileCreateTrrigerOption={
+  timeoutSeconds: 180,
+  memory: '1GB'
+}
+exports.fileCreated=functions.runWith(fileCreateTrrigerOption).firestore
   .document('file/{fileId}')
-  .onCreate((snapshot, _context) => {
-    const fileRef =snapshot.ref
+  .onCreate(async (snapshot, _context) => {
+    const dataRef =snapshot.ref
     const data =snapshot.data()
     const parentRef =data.parentRef
+    const filePath =data.filePath
 
-    parentRef.update({
-      files:admin.firestore.FieldValue.arrayUnion(fileRef),
+    // まず親ドキュメントに紐づけ
+  parentRef.update({
+      files:admin.firestore.FieldValue.arrayUnion(dataRef),
       updatedDate:admin.firestore.FieldValue.serverTimestamp()
+    }).catch(e=>{
+      console.log('ファイル情報の紐づけに失敗:',fileRef)
+      console.log(e)
     })
+  // storageのメタデータ取得
+  const metadata = await getMetadata(filePath,DEFAULT_BUCKET)
+  if(!metadata || !metadata.metadata.uid || !metadata.metadata.parentPath){
+    console.log('メタデータが存在しないか不正なメタデータです。:',metadata)
+    return 0
+  }
+  // サムネイル生成処理
+  const customMetaData = metadata.metadata?metadata.metadata:{error:"no_metadata"}
+  const size=data.size
+  const contentType=data.contentType
+  const maxVideoSize = 70*1024*1024
+    // 画像かつサムネイル画像でないならサムネイル作成処理を行う
+    if(contentType.startsWith('image/') && !filePath.startsWith('thumb/')){
+      console.log("静止画サムネイル生成開始")
+      const thumbPath = await generateImageThumbnail(filePath,DEFAULT_BUCKET,contentType,customMetaData,THUMB_MAX_HEIGHT,THUMB_MAX_WIDTH,THUMB_PREFIX,THUMB_DIR)
+      console.log("ImageThumbPath:",thumbPath)
+      thumbPath? updateThumbInfo(dataRef,thumbPath):null
+    }
+    // 制限サイズ以内のmp4動画ならサムネイル作成処理を行う
+    if(contentType.startsWith('video/mp4') && size<maxVideoSize){
+      console.log("動画サムネイル生成開始")
+      const thumbPath = await generateVideoThumbnail(filePath,DEFAULT_BUCKET,customMetaData,THUMB_MAX_HEIGHT,THUMB_MAX_WIDTH,THUMB_PREFIX,THUMB_DIR)
+      console.log("videoThumbPath:",thumbPath)
+      thumbPath? updateThumbInfo(dataRef,thumbPath):null
+    }
+
+
     return 0
   })
 
