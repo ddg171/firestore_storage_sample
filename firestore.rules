@@ -1,6 +1,19 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function checkNewAccount(account,auth){
+      return account.size() == 5
+      && account.email is string
+      && account.password is string && account.password.size() >7
+      && account.admin is bool
+      && account.displayName is string && account.displayName.size() <29
+      && account.createdBy is string && account.createdBy ==auth.uid
+
+    }
+    match /account/{accountId} {
+      allow read: if request.auth.uid!=null;
+      allow create:if request.auth.uid != null && checkNewAccount(request.resource.data,request.auth);
+    }
     match /post/{postId} {
       allow read, write : if request.auth.uid!=null;
     }
