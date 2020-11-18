@@ -2,7 +2,7 @@ import firebase from 'firebase/app'; // 型の情報が必要
 import { auth, storage, db } from './components/firebase';
 import { HTMLElementEvent } from './components/types';
 import { uploadFile } from './components/storageFunc';
-import { createPost } from './components/dbFunc';
+import { createPost, createAccount } from './components/dbFunc';
 
 async function post(
   uid: string | null,
@@ -100,7 +100,7 @@ async function updateTemplate(
 
 function setUp(): void {
   // フォーム
-  const testform: HTMLFormElement | null = document.querySelector('#form_file');
+  const testform: HTMLFormElement | null = document.querySelector('#form-file');
   if (testform) {
     testform.addEventListener('submit', (e: HTMLElementEvent) => {
       // submit中断
@@ -121,6 +121,69 @@ function setUp(): void {
       post(uid, text, fileList, testform);
     });
   }
+
+  const accountForm: HTMLFormElement | null = document.querySelector(
+    '#form-account'
+  );
+  if (accountForm) {
+    accountForm.addEventListener('submit', (e: HTMLElementEvent) => {
+      // submit中断
+      e.preventDefault();
+      const inputName: HTMLInputElement | null = document.querySelector(
+        '#new-name'
+      );
+      const inputEmail: HTMLInputElement | null = document.querySelector(
+        '#new-email'
+      );
+      const inputPassword: HTMLInputElement | null = document.querySelector(
+        '#new-password'
+      );
+      const inputAdmin: HTMLInputElement | null = document.querySelector(
+        '#admin'
+      );
+      const displayName: string = inputName ? inputName.value : '';
+      const email: string = inputEmail ? inputEmail.value : '';
+      const password: string = inputPassword ? inputPassword.value : '';
+      const admin: boolean = inputAdmin ? inputAdmin.checked : false;
+      const createdBy: string = auth.currentUser ? auth.currentUser.uid : '';
+      createAccount(email, password, displayName, admin, createdBy);
+    });
+  }
+
+  const authForm: HTMLFormElement | null = document.querySelector('#form-auth');
+  if (authForm) {
+    authForm.addEventListener('submit', (e: HTMLElementEvent) => {
+      // submit中断
+      e.preventDefault();
+      const inputEmail: HTMLInputElement | null = document.querySelector(
+        '#email'
+      );
+      const inputPassword: HTMLInputElement | null = document.querySelector(
+        '#password'
+      );
+      const email: string = inputEmail ? inputEmail.value : '';
+      const password: string = inputPassword ? inputPassword.value : '';
+      if (!email || !password) return;
+      auth
+        .signInWithEmailAndPassword(email, password)
+        .then((user: firebase.auth.UserCredential) => {
+          console.log(user);
+
+          const currentUser: firebase.User | null = auth.currentUser;
+
+          if (!currentUser) return;
+          currentUser
+            .getIdTokenResult()
+            .then((idTokenResult: firebase.auth.IdTokenResult) => {
+              console.log(idTokenResult);
+            })
+            .catch((error) => {
+              console.log(error);
+            });
+        });
+    });
+  }
+
   const testButton: HTMLLIElement | null = document.querySelector('#get-btn');
   if (testButton) {
     testButton.addEventListener('click', () => {
