@@ -225,6 +225,209 @@ exports.storageTrriger = functions.storage.object().onFinalize(async (object) =>
   return 0
 })
 
+
+// バリデーション
+function checkEmali(email){
+  const regex = /^[a-zA-Z0-9.!#$%&'*+\/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)*$/
+  const result = email && typeof email=== "string" && email.match(regex);
+  if(!result){
+    console.log("パスワード形式が不正")
+  }
+  return result
+}
+
+function checkPassword(password){
+  const regex = /^[\u0020-\u007E]{6,}$/
+  const result = password && typeof password === "string" && password.match(regex)
+  if(!result){
+    console.log("パスワード形式が不正")
+  }
+  return result
+}
+function checkName(name){
+  const result = name && typeof name === "string"
+  if(!result){
+    console.log("アカウント名形式が不正")
+  }
+  return result
+}
+
+function updateErrorDoc(ref){
+  ref.update(
+    {
+      hasError:true,
+      updatedDate:admin.firestore.FieldValue.serverTimestamp()
+    }
+  ).then(()=>{
+    console.log("エラーフラグ設定成功:",ref)
+  }).catch(e=>{
+    console.log("エラーフラグ設定失敗:",e)
+  })
+}
+
+async function checkUniqueEmail(email,uid='',accountCollection='account'){
+  if(!email){
+    console.log("メールアドレス重複確認に失敗:空文字列")
+  return false
+  }
+  return await admin.firestore().collection(accountCollection).where('email','==',email).limit(1).get().then(snapshot=>{
+    const isEmpty = snapshot.empty
+    // 空ならOK
+    if(isEmpty) return true
+    // 空でない場合
+    // uidが引数として指定されている場合は、ドキュメントのIDと比較して判定
+    console.log(snapshot.docs)
+    const result = uid && uid === snapshot.docs[0].id
+    console.log("メールアドレス重複確認結果:",result)
+    return result
+  }).catch(e=>{
+    console.log("メールアドレス重複確認に失敗",e)
+    return false
+  })
+}
+
+function setCreatedDate(ref){
+  ref.update({
+    createdDate:admin.firestore.FieldValue.serverTimestamp()
+  })
+}
+
+function createNameIndex(uid,nameCollection="name"){
+  admin.firestore().collection(nameCollection).doc(uid).set({
+    createdDate:admin.firestore.FieldValue.serverTimestamp()
+  }).then(()=>{
+    console.log("名前一覧にアカウント情報を追加:",uid)
+  }).catch(e=>{
+    console.log("名前一覧の追加に失敗:",uid,e)
+  })
+}
+function updateNameIndex(uid,displayName,disabled,nameCollection="name"){
+  admin.firestore().collection(nameCollection).doc(uid).update({
+    displayName,
+    disabled,
+    updatedDate:admin.firestore.FieldValue.serverTimestamp()
+  }).then(()=>{
+    console.log("名前一覧を更新:",uid)
+  }).catch(e=>{
+    console.log("名前一覧の更新に失敗:",uid,e)
+  })
+
+}
+function deleteNameIndex(uid,nameCollection="name"){
+  admin.firestore().collection(nameCollection).doc(uid).delete()
+  .then(()=>{
+    console.log("名前一覧から削除:",uid)
+  }).catch(e=>{
+    console.log("名前一覧の削除に失敗:",uid,e)
+  })
+
+}
+
+// accountコレクションのトリガ
+exports.accountCreated =functions.firestore.document('account/{accountId}').onCreate(async (snapshot,context)=>{
+  const data =snapshot.data()
+  const uid = context.params.accountId
+  const accountRef =snapshot.ref
+  // 各要素の検証
+  const email= data.email
+  const password = data.password
+  // const createdBy =data.createdBy
+  // タイムスタンプ設定
+  setCreatedDate(accountRef)
+  // 異常があればエラーフラグを立てて終了
+  if(!checkEmali(email) || !checkPassword(password)){
+    updateErrorDoc(ref)
+    return 0
+  }
+  // メールアドレス重複確認
+  const isUniqueEmail = await checkUniqueEmail(email,uid)
+  if(!isUniqueEmail){
+    updateErrorDoc(accountRef)
+    return 0
+  }
+  // 問題なければ認証情報作成
+  admin.auth().createUser({
+    uid,email,password
+  }).then((user)=>{
+    console.log('アカウント作成成功:',user)
+    accountRef.update(
+      {
+        hasError:false,
+        disabled:false,
+        super:false,
+        hasToken:false,
+        password:null
+      }
+    )
+    createNameIndex(uid)
+  }).catch(e=>{
+    console.log("アカウント作成エラー:",e)
+    updateErrorDoc(ref)
+  })
+  return 0
+})
+
+exports.updateAccount =functions.firestore.document('account/{accountId}').onUpdate((snapshot, context)=>{
+  const uid = context.params.accountId
+  const data = snapshot.after.data()
+  const oldData = snapshot.before.data()
+  const accountRef =snapshot.after.ref
+  const hasError = data.hasError
+  const password =data.password
+  if(hasError){
+    console.log('異常の発生しているアカウント情報です:',uid)
+    return 0
+  }
+  if(password !==null){
+    console.log('認証情報が作成されていません:',uid)
+    return 0
+  }
+  const email=data.email
+  const displayName =data.displayName
+  const isAdmin =data.admin
+  const isSuper = data.super
+  const disabled =data.disabled
+  const newProfile={}
+  if(email !==oldData.email){
+    newProfile.email =email
+  }
+  if(disabled !== oldData.disabled){
+    newProfile.disabled=disabled
+  }
+  if(displayName !== oldData.displayName){
+    newProfile.displayName=displayName
+  }
+  if(Object.keys(newProfile).length){
+
+    admin.auth().updateUser(uid, newProfile).then(() => {
+      console.log('アカウント情報を更新 uid:', uid)
+      updateNameIndex(uid,displayName,disabled)
+    }).catch((err) => {
+      console.log('アカウント情報の更新に失敗uid:', uid, err)
+      updateErrorDoc(accountRef)
+    })
+  }
+  const newClaim ={
+    admin:isAdmin,
+    super:isSuper
+  }
+  admin.auth().setCustomUserClaims(uid, newClaim).then(() => {
+    console.log('権限設定を更新 uid:', uid)
+  }).catch((err) => {
+    console.log('権限設定の更新に失敗uid:', uid, err)
+    updateErrorDoc(accountRef)
+  })
+  return 0
+})
+
+exports.deleteAccount =functions.firestore.document('account/{accountId}').onDelete((_snapshot,context)=>{
+  const uid = context.params.accountId
+  // 名前一覧から削除
+  deleteNameIndex(uid)
+  // 認証情報を削除
+  admin.auth().deleteUser(uid)
+})
+
 // fileコレクションのトリガー
 const fileCreateTrrigerOption={
   timeoutSeconds: 180,
